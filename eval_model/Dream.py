@@ -30,30 +30,39 @@ from lm_eval import utils
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import TemplateLM
 from lm_eval.api.registry import register_model
-from lm_eval.models.utils import (
-    Collator,
-    clear_torch_cache,
-    configure_pad_token,
-    get_dtype,
-    handle_stop_sequences,
-    pad_and_concat,
-    stop_sequences_criteria,
-)
-
 eval_logger = logging.getLogger(__name__)
 from dllm_cache.cache import  dLLMCacheConfig,dLLMCache
 from dllm_cache.hooks import  register_cache_Dream
+from dllm_cache.runtime import resolve_dtype, resolve_runtime
 from dataclasses import asdict
 T = TypeVar("T", bound="LM")
 from lm_eval.api.model import LM
+
+
+PINNED_REVISIONS = {
+    "Dream-org/Dream-v0-Instruct-7B": "05334cb9faaf763692dcf9d8737c642be2b2a6ae",
+    "Dream-org/Dream-v0-Base-7B": "6572adb5535263e4d1a337b56942ba48b6dee2a9",
+}
+
+
+def _resolve_revision(pretrained: str, revision: Optional[str]) -> str:
+    if revision is not None and str(revision).lower() != "auto":
+        return str(revision)
+    if pretrained in PINNED_REVISIONS:
+        return PINNED_REVISIONS[pretrained]
+    raise ValueError(
+        f"No tested revision is registered for {pretrained!r}; pass revision=<commit SHA> explicitly"
+    )
+
 
 @register_model("dream")
 class Dream(LM):
     def __init__(
         self,
         pretrained: Union[str, transformers.PreTrainedModel],
+        revision: Optional[str] = "auto",
         batch_size: Optional[Union[int, str]] = 1,
-        device: Optional[str] = "cuda",
+        device: Optional[str] = "auto",
         dtype: Optional[Union[str, torch.dtype]] = "auto",
         max_new_tokens: Optional[int] = 128,
         max_length: Optional[int] = 2048,
@@ -88,112 +97,48 @@ class Dream(LM):
         self.transfer_ratio = transfer_ratio
         self.add_bos_token = add_bos_token
         self.escape_until = escape_until
+        self.revision = _resolve_revision(pretrained, revision)
+        self._rank = 0
+        self._world_size = 1
 
         # prepare for parallelism
         assert isinstance(device, str)
         assert isinstance(pretrained, str)
         assert isinstance(batch_size, (int, str))
 
-        gpus = torch.cuda.device_count()
         accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(weeks=52))
         accelerator = Accelerator(kwargs_handlers=[accelerator_kwargs])
         if accelerator.num_processes > 1:
             self.accelerator = accelerator
-
-        if "npu" in accelerator.device.type:
-            gpus = torch.npu.device_count()
-
-        # using one process with no model parallelism
-        if not (parallelize or accelerator.num_processes > 1):
-            # use user-passed device
-            device_list = set(
-                ["cuda", "cpu"]
-                + [f"cuda:{i}" for i in range(gpus)]
-                + ["mps", "mps:0"]
-                + [f"npu:{i}" for i in range(gpus)]
+        runtime_device = (
+            str(accelerator.device) if accelerator.num_processes > 1 else device
+        )
+        self._runtime = resolve_runtime(runtime_device)
+        self._device = self._runtime.device
+        self._rank = accelerator.local_process_index
+        self._world_size = accelerator.num_processes
+        if parallelize and self._device.type == "npu":
+            raise ValueError(
+                "parallelize=True is not supported on NPU; launch one process per "
+                "NPU with Accelerate data parallelism instead"
             )
-            if device and device in device_list:
-                self._device = torch.device(device)
-                eval_logger.info(f"Using device '{device}'")
-                if device in ("mps", "mps:0") and version.parse(
-                    torch.__version__
-                ) < version.parse("2.1"):
-                    raise RuntimeError(
-                        f"mps requires torch >= 2.1. You have {torch.__version__}"
-                    )
-            else:
-                eval_logger.info("Device not specified")
-                eval_logger.info(f"Cuda Available? {torch.cuda.is_available()}")
-                self._device = (
-                    torch.device("cuda")
-                    if torch.cuda.is_available()
-                    else torch.device("cpu")
-                )
-        else:  # Parallelism managed by accelerate
-            if device != "cuda":
-                eval_logger.info(
-                    f"Using `accelerate launch` or `parallelize=True`, device '{device}' will be overridden when placing model."
-                )
-            # TODO: include in warning that `load_in_8bit` etc. affect this too
-            self._device = (
-                self.accelerator.device
-                if hasattr(self, "accelerator")
-                else torch.device(device)
+        if parallelize and accelerator.num_processes > 1:
+            raise ValueError(
+                "parallelize=True cannot be combined with an Accelerate multi-process launch"
             )
+        eval_logger.info(
+            "Using device '%s' (rank %s/%s)",
+            self._device,
+            self._rank,
+            self._world_size,
+        )
 
         self.batch_size_per_gpu = batch_size
         if isinstance(batch_size, str):
             self.batch_size_per_gpu = int(batch_size)
-        self._create_model_and_tokenizer(pretrained, dtype, trust_remote_code)
-
-        if isinstance(pretrained, str):
-            if gpus >= 1 or str(self.device) == "mps":
-                # TODO: can remove this whole snippet except in the mps case, perhaps?
-                if not (parallelize or autogptq or hasattr(self, "accelerator")):
-                    # place model onto device requested manually,
-                    # if not using HF Accelerate or device_map
-                    # or any other option that preloads model onto device
-                    try:
-                        self.model.to(self.device)
-                    except ValueError:
-                        eval_logger.debug(
-                            "Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes` or `device_map` is provided. If the desired GPU is being used, this message is safe to ignore."
-                        )
-            # multigpu data-parallel support when launched with accelerate
-            if gpus > 1:
-                if accelerator.num_processes > 1:
-                    if parallelize:
-                        eval_logger.warning(
-                            "You are both using a HF Accelerate `device_map` (`--model_args parallelize=True`) and launching via `accelerate launch`. This will attempt to do model and data parallelism depending on the resources available."
-                        )
-                    elif gpus > accelerator.num_processes:
-                        eval_logger.warning(
-                            "WARNING: The number of total system GPUs does not match the number of spawned processes. "
-                            "If you would like to use data parallelism, please launch the script "
-                            "with 'accelerate launch *script*'. "
-                            f"Current run will proceed with {accelerator.num_processes} devices."
-                        )
-                        if self.accelerator.is_local_main_process:
-                            eval_logger.info(
-                                f"Using {gpus} devices with data parallelism"
-                            )
-
-                    self._device = torch.device(f"{accelerator.device}")
-                    self.accelerator = accelerator
-
-                    self._rank = self.accelerator.local_process_index
-                    self._world_size = self.accelerator.num_processes
-                else:
-                    # if we aren't launching via accelerate, ditch
-                    self._rank = 0
-                    self._world_size = 1
-        else:
-            # if a PreTrainedModel was passed into HFLM, we forgo distributed setup.
-            eval_logger.warning(
-                "Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration"
-            )
-            self._rank = 0
-            self._world_size = 1
+        self._create_model_and_tokenizer(
+            pretrained, self.revision, dtype, trust_remote_code
+        )
 
 
         if is_feature_cache:
@@ -250,18 +195,46 @@ class Dream(LM):
     def world_size(self):
         return self._world_size
 
-    def _create_model_and_tokenizer(self, pretrained, dtype, trust_remote_code):
+    # lm-eval's distributed evaluator uses these primitives to balance
+    # requests and gather per-rank samples/metrics.  The original adapter
+    # only exposed rank/world_size, so the base no-op implementations made an
+    # eight-rank run treat a scalar local count as the global count.  Delegate
+    # to Accelerate/torch.distributed exactly as the upstream HF adapter does.
+    def all_gather(self, tensor):
+        if self.world_size <= 1:
+            return tensor
+        return self.accelerator.gather(tensor)
+
+    def gather_object(self, obj, dst=0):
+        if self.world_size <= 1:
+            return [obj]
+        result = [None] * self.world_size if self.rank == dst else None
+        torch.distributed.gather_object(obj=obj, object_gather_list=result, dst=dst)
+        return result
+
+    def barrier(self):
+        if self.world_size > 1:
+            self.accelerator.wait_for_everyone()
+
+    def _create_model_and_tokenizer(
+        self, pretrained, revision, dtype, trust_remote_code
+    ):
         self.model = (
             transformers.AutoModel.from_pretrained(
                 pretrained,
-                torch_dtype=get_dtype(dtype),
+                revision=revision,
+                torch_dtype=(
+                    dtype
+                    if isinstance(dtype, torch.dtype)
+                    else resolve_dtype(dtype, runtime=self._runtime)
+                ),
                 trust_remote_code=trust_remote_code,
             )
             .eval()
         ).to(self.device)
 
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            pretrained, trust_remote_code=trust_remote_code
+            pretrained, revision=revision, trust_remote_code=trust_remote_code
         )
 
     def tok_decode(self, tokens, skip_special_tokens=True):
@@ -300,10 +273,20 @@ class Dream(LM):
         if self.add_bos_token:
             prompts = [self.tokenizer.bos_token + p for p in prompts]
         # tokenize
-        prompt_ids = self.tokenizer(prompts, return_tensors="pt", padding=True, padding_side="left").input_ids
-        if len(prompt_ids) > self.max_length-self.max_new_tokens:
-            eval_logger.warning(f"Prompt length {len(prompt_ids)} is larger than {self.max_length-self.max_new_tokens}, cutoff on the left side")
-            prompt_ids = prompt_ids[-(self.max_length-self.max_new_tokens):]
+        old_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+        prompt_ids = self.tokenizer(
+            prompts, return_tensors="pt", padding=True
+        ).input_ids
+        self.tokenizer.padding_side = old_padding_side
+        prompt_limit = self.max_length - self.max_new_tokens
+        if prompt_ids.shape[1] > prompt_limit:
+            eval_logger.warning(
+                "Prompt length %s is larger than %s, cutoff on the left side",
+                prompt_ids.shape[1],
+                prompt_limit,
+            )
+            prompt_ids = prompt_ids[:, -prompt_limit:]
 
         attn_mask = prompt_ids.ne(self.tokenizer.pad_token_id)
         prompt_ids = prompt_ids.to(device=self.device)
@@ -358,4 +341,3 @@ class Dream(LM):
             pbar.update(len(contexts))
 
         return res
-

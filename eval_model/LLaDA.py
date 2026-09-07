@@ -30,23 +30,38 @@ from lm_eval import utils
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import TemplateLM
 from lm_eval.api.registry import register_model
-from lm_eval.models.utils import (
-    Collator,
-    clear_torch_cache,
-    configure_pad_token,
-    get_dtype,
-    handle_stop_sequences,
-    pad_and_concat,
-    stop_sequences_criteria,
-)
+from lm_eval.models.utils import configure_pad_token
 
 eval_logger = logging.getLogger(__name__)
 from utils import  generate
 from dllm_cache.cache import  dLLMCacheConfig,dLLMCache
 from dllm_cache.hooks import  register_cache_LLaDA
+from dllm_cache.runtime import resolve_dtype, resolve_runtime
 from dataclasses import asdict
 T = TypeVar("T", bound="LM")
 from lm_eval.api.model import LM
+
+
+PINNED_REVISIONS = {
+    "GSAI-ML/LLaDA-8B-Instruct": "08b83a6feb34df1a6011b80c3c00c7563e963b07",
+    "GSAI-ML/LLaDA-8B-Base": "0f2787f2d87eac5eed8a087d5ecd24277e6255b2",
+}
+
+
+def _resolve_revision(pretrained, revision: Optional[str]) -> str:
+    if revision is not None and str(revision).lower() != "auto":
+        return str(revision)
+    model_id = (
+        pretrained
+        if isinstance(pretrained, str)
+        else getattr(pretrained, "name_or_path", None)
+    )
+    if model_id in PINNED_REVISIONS:
+        return PINNED_REVISIONS[model_id]
+    raise ValueError(
+        f"No tested revision is registered for {model_id!r}; pass revision=<commit SHA> explicitly"
+    )
+
 
 @register_model("LLaDA")
 class LLaDA(TemplateLM):
@@ -57,7 +72,7 @@ class LLaDA(TemplateLM):
         self,
         pretrained: Union[str, transformers.PreTrainedModel],
         backend: Literal["default", "causal", "seq2seq"] = "causal",
-        revision: Optional[str] = "main",
+        revision: Optional[str] = "auto",
         subfolder: Optional[str] = None,
         tokenizer: Optional[
             Union[
@@ -69,7 +84,7 @@ class LLaDA(TemplateLM):
         truncation: Optional[bool] = False,
         logits_cache: bool = True,
         max_length: Optional[int] = None,
-        device: Optional[str] = "cuda",
+        device: Optional[str] = "auto",
         dtype: Optional[Union[str, torch.dtype]] = "auto",
         batch_size: Optional[Union[int]] = 1,
         max_batch_size: Optional[int] = 64,
@@ -114,6 +129,9 @@ class LLaDA(TemplateLM):
         self.is_check_greedy = is_check_greedy
         self.add_bos_token = add_bos_token
         self.escape_until = escape_until
+        revision = _resolve_revision(pretrained, revision)
+        self._rank = 0
+        self._world_size = 1
         if not isinstance(pretrained, str):
             eval_logger.warning(
                 "`pretrained` model kwarg is not of type `str`. Many other model arguments may be ignored. Please do not launch via accelerate or use `parallelize=True` if passing an existing model this way."
@@ -123,6 +141,7 @@ class LLaDA(TemplateLM):
             )
             self._model = pretrained
             self._device = self._model.device
+            self._runtime = resolve_runtime(str(self._device))
             self._config = self._model.config
             gpus = 0
 
@@ -131,60 +150,45 @@ class LLaDA(TemplateLM):
             assert isinstance(pretrained, str)
             assert isinstance(batch_size, (int, str))
 
-            gpus = torch.cuda.device_count()
             accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(weeks=52))
             accelerator = Accelerator(kwargs_handlers=[accelerator_kwargs])
             if accelerator.num_processes > 1:
                 self.accelerator = accelerator
 
-            if "npu" in accelerator.device.type:
+            # In a distributed launch Accelerate owns rank-to-device placement.
+            runtime_device = (
+                str(accelerator.device) if accelerator.num_processes > 1 else device
+            )
+            self._runtime = resolve_runtime(runtime_device)
+            self._device = self._runtime.device
+            self._rank = accelerator.local_process_index
+            self._world_size = accelerator.num_processes
+            if parallelize and self._device.type == "npu":
+                raise ValueError(
+                    "parallelize=True is not supported on NPU; launch one process per "
+                    "NPU with Accelerate data parallelism instead"
+                )
+            if parallelize and accelerator.num_processes > 1:
+                raise ValueError(
+                    "parallelize=True cannot be combined with an Accelerate multi-process launch"
+                )
+            if self._device.type == "cuda":
+                gpus = torch.cuda.device_count()
+            elif self._device.type == "npu":
                 gpus = torch.npu.device_count()
-
-            # using one process with no model parallelism
-            if not (parallelize or accelerator.num_processes > 1):
-                # use user-passed device
-                device_list = set(
-                    ["cuda", "cpu"]
-                    + [f"cuda:{i}" for i in range(gpus)]
-                    + ["mps", "mps:0"]
-                    + [f"npu:{i}" for i in range(gpus)]
-                )
-                if device and device in device_list:
-                    self._device = torch.device(device)
-                    eval_logger.info(f"Using device '{device}'")
-                    if device in ("mps", "mps:0") and version.parse(
-                        torch.__version__
-                    ) < version.parse("2.1"):
-                        raise RuntimeError(
-                            f"mps requires torch >= 2.1. You have {torch.__version__}"
-                        )
-                else:
-                    eval_logger.info("Device not specified")
-                    eval_logger.info(f"Cuda Available? {torch.cuda.is_available()}")
-                    self._device = (
-                        torch.device("cuda")
-                        if torch.cuda.is_available()
-                        else torch.device("cpu")
-                    )
-            else:  # Parallelism managed by accelerate
-                if device != "cuda":
-                    eval_logger.info(
-                        f"Using `accelerate launch` or `parallelize=True`, device '{device}' will be overridden when placing model."
-                    )
-                # TODO: include in warning that `load_in_8bit` etc. affect this too
-                self._device = (
-                    self.accelerator.device
-                    if hasattr(self, "accelerator")
-                    else torch.device(device)
-                )
-
-            revision = str(revision)  # cast to string if not already one
-            # TODO: update this to be less of a hack once subfolder is fixed in HF
-            revision = revision + ("/" + subfolder if subfolder is not None else "")
+            else:
+                gpus = 0
+            eval_logger.info(
+                "Using device '%s' (rank %s/%s)",
+                self._device,
+                self._rank,
+                self._world_size,
+            )
 
             self._get_config(
                 pretrained,
                 revision=revision,
+                subfolder=subfolder,
                 trust_remote_code=trust_remote_code,
                 gguf_file=gguf_file,
             )
@@ -196,6 +200,7 @@ class LLaDA(TemplateLM):
             pretrained,
             tokenizer,
             revision=revision,
+            subfolder=subfolder,
             trust_remote_code=trust_remote_code,
             use_fast_tokenizer=use_fast_tokenizer,
             gguf_file=gguf_file,
@@ -206,6 +211,7 @@ class LLaDA(TemplateLM):
             self._create_model(
                 pretrained=pretrained,
                 revision=revision,
+                subfolder=subfolder,
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,
                 parallelize=parallelize,
@@ -255,53 +261,11 @@ class LLaDA(TemplateLM):
         else:
             self.batch_size_per_gpu = int(batch_size)
 
-        if isinstance(pretrained, str):
-            if gpus >= 1 or str(self.device) == "mps":
-                # TODO: can remove this whole snippet except in the mps case, perhaps?
-                if not (parallelize or autogptq or hasattr(self, "accelerator")):
-                    # place model onto device requested manually,
-                    # if not using HF Accelerate or device_map
-                    # or any other option that preloads model onto device
-                    try:
-                        self.model.to(self.device)
-                    except ValueError:
-                        eval_logger.debug(
-                            "Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes` or `device_map` is provided. If the desired GPU is being used, this message is safe to ignore."
-                        )
-            # multigpu data-parallel support when launched with accelerate
-            if gpus > 1:
-                if accelerator.num_processes > 1:
-                    if parallelize:
-                        eval_logger.warning(
-                            "You are both using a HF Accelerate `device_map` (`--model_args parallelize=True`) and launching via `accelerate launch`. This will attempt to do model and data parallelism depending on the resources available."
-                        )
-                    elif gpus > accelerator.num_processes:
-                        eval_logger.warning(
-                            "WARNING: The number of total system GPUs does not match the number of spawned processes. "
-                            "If you would like to use data parallelism, please launch the script "
-                            "with 'accelerate launch *script*'. "
-                            f"Current run will proceed with {accelerator.num_processes} devices."
-                        )
-                        if self.accelerator.is_local_main_process:
-                            eval_logger.info(
-                                f"Using {gpus} devices with data parallelism"
-                            )
-
-                    self._device = torch.device(f"{accelerator.device}")
-                    self.accelerator = accelerator
-                    self._rank = self.accelerator.local_process_index
-                    self._world_size = self.accelerator.num_processes
-                else:
-                    # if we aren't launching via accelerate, ditch
-                    self._rank = 0
-                    self._world_size = 1
-        else:
+        if not isinstance(pretrained, str):
             # if a PreTrainedModel was passed into HFLM, we forgo distributed setup.
             eval_logger.warning(
                 "Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration"
             )
-            self._rank = 0
-            self._world_size = 1
         self.custom_prefix_token_id = prefix_token_id
         if prefix_token_id is not None:
             eval_logger.info(
@@ -462,8 +426,36 @@ class LLaDA(TemplateLM):
 
     @property
     def device(self):
-        
         return self._device
+
+    @property
+    def rank(self):
+        return self._rank
+
+    @property
+    def world_size(self):
+        return self._world_size
+
+    # lm-eval's distributed evaluator uses these primitives to balance
+    # requests and gather per-rank samples/metrics.  Without overriding the
+    # base no-op implementations, multi-NPU evaluation receives a scalar
+    # local request count and fails during padding/aggregation.
+    def all_gather(self, tensor):
+        if self.world_size <= 1:
+            return tensor
+        return self.accelerator.gather(tensor)
+
+    def gather_object(self, obj, dst=0):
+        if self.world_size <= 1:
+            return [obj]
+        result = [None] * self.world_size if self.rank == dst else None
+        torch.distributed.gather_object(obj=obj, object_gather_list=result, dst=dst)
+        return result
+
+    def barrier(self):
+        if self.world_size > 1:
+            self.accelerator.wait_for_everyone()
+
     @property
     def tokenizer_name(self) -> str:
         return self.tokenizer.name_or_path.replace("/", "__")
@@ -534,21 +526,28 @@ class LLaDA(TemplateLM):
         self,
         pretrained: str,
         revision: str = "main",
+        subfolder: Optional[str] = None,
         trust_remote_code: bool = False,
         gguf_file: Optional[str] = None,
     ) -> None:
         """Return the model config for HuggingFace models"""
+        load_kwargs = {
+            "revision": revision,
+            "trust_remote_code": trust_remote_code,
+            "gguf_file": gguf_file,
+        }
+        if subfolder is not None:
+            load_kwargs["subfolder"] = subfolder
         self._config = transformers.AutoConfig.from_pretrained(
             pretrained,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-            gguf_file=gguf_file,
+            **load_kwargs,
         )
 
     def _create_model(
         self,
         pretrained: str,
         revision: Optional[str] = "main",
+        subfolder: Optional[str] = None,
         dtype: Optional[Union[str, torch.dtype]] = "auto",
         trust_remote_code: Optional[bool] = False,
         # arguments used for splitting a model across GPUs naively.
@@ -582,26 +581,39 @@ class LLaDA(TemplateLM):
             raise ValueError("'autogptq' and 'gptqmodel' are not supported yet")
         if peft or delta:
             raise ValueError("'peft' and 'delta' are not supported yet")
-        model_kwargs = kwargs if kwargs else {}
-
-        model_kwargs.update(
-            self._get_accelerate_args(
+        model_kwargs = {}
+        unused_kwargs = {key: value for key, value in kwargs.items() if key != "device_map"}
+        if unused_kwargs:
+            eval_logger.warning(
+                "Ignoring unsupported model arguments: %s",
+                ", ".join(sorted(unused_kwargs)),
+            )
+        if parallelize:
+            model_kwargs.update(self._get_accelerate_args(
                 parallelize=parallelize,
-                device_map=kwargs.get("device_map", None),
+                device_map=kwargs.get("device_map", "auto"),
                 max_memory_per_gpu=max_memory_per_gpu,
                 max_cpu_memory=max_cpu_memory,
                 offload_folder=offload_folder,
                 gpus=gpus,
-            )
-        )
+            ))
             
-        self._model = transformers.AutoModel.from_pretrained(
-            pretrained,
-            revision=revision,
-            torch_dtype=get_dtype(dtype),
-            trust_remote_code=trust_remote_code
-        )
-        self._model = self._model.to(self.device).eval()
+        load_kwargs = {
+            "revision": revision,
+            "torch_dtype": (
+                dtype
+                if isinstance(dtype, torch.dtype)
+                else resolve_dtype(dtype, runtime=self._runtime)
+            ),
+            "trust_remote_code": trust_remote_code,
+            **model_kwargs,
+        }
+        if subfolder is not None:
+            load_kwargs["subfolder"] = subfolder
+        self._model = transformers.AutoModel.from_pretrained(pretrained, **load_kwargs)
+        if not parallelize:
+            self._model = self._model.to(self.device)
+        self._model.eval()
             
 
 
@@ -616,6 +628,7 @@ class LLaDA(TemplateLM):
             ]
         ],
         revision: Optional[str] = "main",
+        subfolder: Optional[str] = None,
         trust_remote_code: Optional[bool] = False,
         use_fast_tokenizer: Optional[bool] = True,
         gguf_file: Optional[str] = None,
@@ -631,6 +644,8 @@ class LLaDA(TemplateLM):
             "revision": revision,
             "trust_remote_code": trust_remote_code,
         }
+        if subfolder is not None:
+            kwargs["subfolder"] = subfolder
 
         # gguf format embeds tokenizer and is not compatible with hf tokenizer `use_fast` param
         if gguf_file is not None:

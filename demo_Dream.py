@@ -1,166 +1,183 @@
+"""Interactive Dream text-generation demo."""
+
+import argparse
 import time
-from datetime import datetime
-from dllm_cache.cache import dLLMCache, dLLMCacheConfig
-from dllm_cache.hooks import register_cache_Dream, logout_cache_Dream
 from dataclasses import asdict
+from datetime import datetime
+
 from transformers import AutoModel, AutoTokenizer
-import torch
 
-# Configuration parameters
-prompt_interval_steps = 100
-gen_interval_steps = 7
-transfer_ratio = 0.25
-use_cache = True
-device = "cuda" if torch.cuda.is_available() else "cpu"
-max_new_tokens = 256
-steps = 256
-max_tokens = 2048
+from dllm_cache.cache import dLLMCache, dLLMCacheConfig
+from dllm_cache.hooks import logout_cache_Dream, register_cache_Dream
+from dllm_cache.runtime import resolve_dtype, resolve_runtime
 
-# Load model and tokenizer
-model = (
-    AutoModel.from_pretrained(
-        "Dream-org/Dream-v0-Instruct-7B",
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
+
+MODEL_ID = "Dream-org/Dream-v0-Instruct-7B"
+MODEL_REVISION = "05334cb9faaf763692dcf9d8737c642be2b2a6ae"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", default="auto", help="auto, npu[:N], cuda[:N], or cpu")
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", "bfloat16", "float16", "float32"),
     )
-    .to(device)
-    .eval()
-)
-tokenizer = AutoTokenizer.from_pretrained(
-    "Dream-org/Dream-v0-Instruct-7B", trust_remote_code=True
-)
-
-# Initialize cache
-if use_cache:
-    dLLMCache.new_instance(
-        **asdict(
-            dLLMCacheConfig(
-                prompt_interval_steps=prompt_interval_steps,
-                gen_interval_steps=gen_interval_steps,
-                transfer_ratio=transfer_ratio,
-            )
-        )
+    parser.add_argument(
+        "--revision",
+        default="auto",
+        help="Hugging Face revision; 'auto' uses the tested pinned commit",
     )
-    register_cache_Dream(model, "model.layers")
+    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--steps", type=int, default=256)
+    parser.add_argument("--max-history-tokens", type=int, default=2048)
+    parser.add_argument("--prompt-interval-steps", type=int, default=100)
+    parser.add_argument("--gen-interval-steps", type=int, default=7)
+    parser.add_argument("--transfer-ratio", type=float, default=0.25)
+    parser.add_argument("--no-cache", action="store_true", help="start with cache disabled")
+    return parser.parse_args()
 
-# Store conversation history
-conversation_history = []
 
-def format_time():
-    """Return current time in formatted string"""
+def format_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def truncate_conversation(history, max_tokens):
-    """Truncate conversation history to ensure total tokens do not exceed max_tokens"""
+
+def truncate_conversation(tokenizer, history, max_tokens):
     total_tokens = 0
     truncated_history = []
-    for msg in reversed(history):
-        tokens = len(tokenizer(msg["content"])["input_ids"])
-        if total_tokens + tokens <= max_tokens:
-            truncated_history.insert(0, msg)
-            total_tokens += tokens
-        else:
+    for message in reversed(history):
+        tokens = len(tokenizer(message["content"])["input_ids"])
+        if total_tokens + tokens > max_tokens:
             break
+        truncated_history.insert(0, message)
+        total_tokens += tokens
     return truncated_history
 
-def print_help():
-    """Print available commands"""
+
+def configure_cache(model, args, enabled: bool) -> None:
+    if enabled:
+        dLLMCache.new_instance(
+            **asdict(
+                dLLMCacheConfig(
+                    prompt_interval_steps=args.prompt_interval_steps,
+                    gen_interval_steps=args.gen_interval_steps,
+                    transfer_ratio=args.transfer_ratio,
+                )
+            )
+        )
+        register_cache_Dream(model, "model.layers")
+    else:
+        logout_cache_Dream(model, "model.layers")
+        dLLMCache.new_instance(prompt_interval_steps=1, gen_interval_steps=1)
+
+
+def print_help() -> None:
     print("\nAvailable commands:")
     print("  <help>       : Show this help message")
     print("  <use_cache>  : Enable cache")
     print("  <no_cache>   : Disable cache")
     print("  <clear>      : Clear conversation history")
-    print("  <exit>       : Exit the program")
-    print()
+    print("  <exit>       : Exit the program\n")
 
-print("*" * 66)
-print(
-    f"** Answer Length: {max_new_tokens}  | Sampling Steps: {steps}  | Cache Enabled: {use_cache}"
-)
-print("*" * 66)
-print("Type '<help>' for available commands.")
 
-while True:
-    print("\n" + "=" * 70)
-    user_input = input(f"Enter your question (Cache is {'enable' if use_cache else 'disable'}, Type '<help>' for available commands): ")
+def main() -> None:
+    args = parse_args()
+    runtime = resolve_runtime(args.device)
+    dtype = resolve_dtype(args.dtype, runtime=runtime)
+    revision = MODEL_REVISION if args.revision == "auto" else args.revision
 
-    if user_input.lower() == '<exit>':
-        print("Conversation ended.")
-        break
-
-    if user_input == "<help>":
-        print_help()
-        continue
-
-    if user_input == "<no_cache>":
-        logout_cache_Dream(model, "model.layers")
-        use_cache = False
-        print("Cache disabled. Please continue with your question.")
-        continue
-
-    if user_input == "<use_cache>":
-        dLLMCache.new_instance(
-            **asdict(
-                dLLMCacheConfig(
-                    prompt_interval_steps=prompt_interval_steps,
-                    gen_interval_steps=gen_interval_steps,
-                    transfer_ratio=transfer_ratio,
-                )
-            )
-        )
-        register_cache_Dream(model, "model.layers")
-        use_cache = True
-        print("Cache enabled. Please continue with your question.")
-        continue
-
-    if user_input == "<clear>":
-        conversation_history = []
-        print("Conversation history cleared. Please continue with your question.")
-        continue
-
-    # Record user input time
-    input_time = format_time()
-    conversation_history.append({"role": "user", "content": user_input, "time": input_time})
-
-    # Truncate conversation history to ensure it does not exceed max token limit
-    conversation_history = truncate_conversation(conversation_history, max_tokens)
-
-    # Apply chat template
-    formatted_input = tokenizer.apply_chat_template(
-        conversation_history, add_generation_prompt=True, tokenize=False
+    model = AutoModel.from_pretrained(
+        MODEL_ID,
+        revision=revision,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+    ).to(runtime.device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_ID, revision=revision, trust_remote_code=True
     )
 
-    # Encode input
-    input_ids = tokenizer(formatted_input)["input_ids"]
-    attention_mask = tokenizer(formatted_input)["attention_mask"]
-    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
-    attention_mask = torch.tensor(attention_mask).to(device).unsqueeze(0)
+    use_cache = not args.no_cache
+    configure_cache(model, args, use_cache)
+    conversation_history = []
 
-    # Reset cache
-    feature_cache = dLLMCache()
-    feature_cache.reset_cache(input_ids.shape[1])
+    print("*" * 66)
+    print(
+        f"** Device: {runtime.device} | Dtype: {dtype} | Answer Length: "
+        f"{args.max_new_tokens} | Sampling Steps: {args.steps} | Cache Enabled: {use_cache}"
+    )
+    print("*" * 66)
+    print("Type '<help>' for available commands.")
 
-    # Generate response
-    start_time = time.time()
-    generation_ids = model.diffusion_generate(
-        input_ids,
-        attention_mask=attention_mask,
-        max_new_tokens=max_new_tokens,
-        output_history=False,
-        return_dict_in_generate=True,
-        steps=steps,
-        temperature=0.2,
-        top_p=0.95,
-    ).sequences[:, input_ids.shape[1]:]
-    end_time = time.time()
+    while True:
+        print("\n" + "=" * 70)
+        user_input = input(
+            f"Enter your question (Cache is {'enable' if use_cache else 'disable'}, "
+            "Type '<help>' for available commands): "
+        )
+        command = user_input.lower()
+        if command == "<exit>":
+            print("Conversation ended.")
+            break
+        if command == "<help>":
+            print_help()
+            continue
+        if command == "<no_cache>":
+            configure_cache(model, args, False)
+            use_cache = False
+            print("Cache disabled. Please continue with your question.")
+            continue
+        if command == "<use_cache>":
+            configure_cache(model, args, True)
+            use_cache = True
+            print("Cache enabled. Please continue with your question.")
+            continue
+        if command == "<clear>":
+            conversation_history = []
+            print("Conversation history cleared. Please continue with your question.")
+            continue
 
-    # Decode response
-    answer = tokenizer.batch_decode(generation_ids, skip_special_tokens=True)[0]
-    reply_time = format_time()
+        conversation_history.append(
+            {"role": "user", "content": user_input, "time": format_time()}
+        )
+        conversation_history = truncate_conversation(
+            tokenizer, conversation_history, args.max_history_tokens
+        )
+        formatted_input = tokenizer.apply_chat_template(
+            conversation_history, add_generation_prompt=True, tokenize=False
+        )
+        encoded = tokenizer(formatted_input, return_tensors="pt")
+        input_ids = encoded["input_ids"].to(runtime.device)
+        attention_mask = encoded["attention_mask"].to(runtime.device)
 
-    # Store assistant response
-    conversation_history.append({"role": "assistant", "content": answer, "time": reply_time})
+        dLLMCache().reset_cache(input_ids.shape[1])
+        runtime.reset_peak_memory_stats()
+        runtime.synchronize()
+        start_time = time.perf_counter()
+        generation_ids = model.diffusion_generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=args.max_new_tokens,
+            output_history=False,
+            return_dict_in_generate=True,
+            steps=args.steps,
+            temperature=0.2,
+            top_p=0.95,
+        ).sequences[:, input_ids.shape[1] :]
+        runtime.synchronize()
+        elapsed = time.perf_counter() - start_time
 
-    # Print conversation
-    print(f"Dream ({reply_time}): {answer}")
-    print(f"Generation Time: {end_time - start_time:.2f} seconds")
+        answer = tokenizer.batch_decode(
+            generation_ids, skip_special_tokens=True
+        )[0]
+        reply_time = format_time()
+        conversation_history.append(
+            {"role": "assistant", "content": answer, "time": reply_time}
+        )
+        print(f"Dream ({reply_time}): {answer}")
+        print(f"Generation Time: {elapsed:.2f} seconds")
+        print(f"Memory: {runtime.memory_stats()}")
+
+
+if __name__ == "__main__":
+    main()
