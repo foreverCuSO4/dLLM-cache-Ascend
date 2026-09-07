@@ -1,0 +1,18 @@
+schema_version: 1
+models:
+  llada_instruct:
+    family: llada
+    repo_id: GSAI-ML/LLaDA-8B-Instruct
+    revision: 08b83a6feb34df1a6011b80c3c00c7563e963b07
+  llada_base:
+    family: llada
+    repo_id: GSAI-ML/LLaDA-8B-Base
+    revision: 0f2787f2d87eac5eed8a087d5ecd24277e6255b2
+  dream_instruct:
+    family: dream
+    repo_id: Dream-org/Dream-v0-Instruct-7B
+    revision: 05334cb9faaf763692dcf9d8737c642be2b2a6ae
+  dream_base:
+    family: dream
+    repo_id: Dream-org/Dream-v0-Base-7B
+    revision: 6572adb5535263e4d1a337b56942ba48b6dee2a9

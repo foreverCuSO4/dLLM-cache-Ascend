@@ -1,0 +1,30 @@
+# Runtime versions validated together for CANN 8.0.1 / Ascend driver 24.1.0.3.
+# Training, DeepSpeed, FLOP profiling, and multimodal dependencies are excluded.
+torch==2.4.0
+torch-npu==2.4.0.post2
+transformers==4.51.3
+accelerate==1.6.0
+datasets==3.6.0
+lm-eval[longbench,math]==0.4.12
+# Metric dependencies pulled in by lm-eval's LongBench extra.
+jieba==0.42.1
+fuzzywuzzy==0.18.0
+rouge==1.0.1
+numpy==1.26.4
+peft==0.15.2
+huggingface-hub==0.36.2
+hf-xet==1.5.1
+tqdm==4.67.1
+jinja2==3.1.6
+packaging==24.2
+pyyaml==6.0.2
+
+# Python dependencies imported by CANN 8.0.1's TBE/compiler modules at runtime.
+decorator==5.2.1
+cloudpickle==3.1.2
+ml-dtypes==0.5.3
+tornado==6.5.4
+einops==0.8.2
+
+# Test-only dependency used by the migration smoke/unit suite.
+pytest==8.3.5
