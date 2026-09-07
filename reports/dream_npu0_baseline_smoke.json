@@ -1,0 +1,62 @@
+{
+  "model": "dream",
+  "model_id": "Dream-org/Dream-v0-Instruct-7B",
+  "revision": "05334cb9faaf763692dcf9d8737c642be2b2a6ae",
+  "device": "npu:0",
+  "backend": "npu",
+  "dtype": "torch.bfloat16",
+  "batch_size": 1,
+  "prompt_length": 16,
+  "gen_length": 8,
+  "steps": 8,
+  "block_length": null,
+  "warmup": 0,
+  "repeats": 1,
+  "cache_config": {
+    "prompt_interval_steps": 100,
+    "gen_interval_steps": 7,
+    "cfg_interval_steps": 1,
+    "transfer_ratio": 0.25
+  },
+  "results": [
+    {
+      "mode": "baseline",
+      "latency_seconds": {
+        "mean": 0.8319365493953228,
+        "p50": 0.8319365493953228,
+        "p90": 0.8319365493953228,
+        "min": 0.8319365493953228,
+        "max": 0.8319365493953228
+      },
+      "samples_per_second": 1.2020147458683368,
+      "generated_tokens_per_second": 9.616117966946694,
+      "memory": {
+        "allocated_bytes": 15276467712,
+        "reserved_bytes": 15437135872,
+        "max_allocated_bytes": 15306700800,
+        "max_reserved_bytes": 15437135872,
+        "total_bytes": 31662800896
+      },
+      "cache_config": {
+        "prompt_interval_steps": 1,
+        "gen_interval_steps": 1,
+        "transfer_ratio": 0.0,
+        "cfg_interval_steps": 1
+      },
+      "output_sha256": "df205f172b147019f1c99da042e536d27457a26edb9a4fa7f8690657f1719a92",
+      "output_token_ids": [
+        [
+          151643,
+          151643,
+          151643,
+          151643,
+          151643,
+          151643,
+          151643,
+          151643
+        ]
+      ],
+      "speedup_vs_baseline": 1.0
+    }
+  ]
+}

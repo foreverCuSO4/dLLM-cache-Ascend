@@ -1,0 +1,49 @@
+{
+  "model": "llada",
+  "model_id": "GSAI-ML/LLaDA-8B-Instruct",
+  "revision": "08b83a6feb34df1a6011b80c3c00c7563e963b07",
+  "device": "npu:1",
+  "backend": "npu",
+  "dtype": "torch.bfloat16",
+  "batch_size": 1,
+  "prompt_length": 16,
+  "gen_length": 8,
+  "steps": 8,
+  "block_length": 8,
+  "warmup": 0,
+  "repeats": 1,
+  "cache_config": {
+    "prompt_interval_steps": 100,
+    "gen_interval_steps": 7,
+    "cfg_interval_steps": 1,
+    "transfer_ratio": 0.25
+  },
+  "results": [
+    {
+      "mode": "adaptive",
+      "latency_seconds": {
+        "mean": 1.4865722227841616,
+        "p50": 1.4865722227841616,
+        "p90": 1.4865722227841616,
+        "min": 1.4865722227841616,
+        "max": 1.4865722227841616
+      },
+      "samples_per_second": 0.6726884739761426,
+      "generated_tokens_per_second": 5.381507791809141,
+      "memory": {
+        "allocated_bytes": 16068929536,
+        "reserved_bytes": 16622026752,
+        "max_allocated_bytes": 16107750912,
+        "max_reserved_bytes": 16622026752,
+        "total_bytes": 31662800896
+      },
+      "cache_config": {
+        "prompt_interval_steps": 100,
+        "gen_interval_steps": 7,
+        "transfer_ratio": 0.25,
+        "cfg_interval_steps": 1
+      },
+      "speedup_vs_baseline": null
+    }
+  ]
+}

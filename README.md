@@ -38,6 +38,23 @@ Create a Python environment with `conda` or `virtualenv` and install dependencie
 bash install.sh
 ```
 
+### Ascend 910B
+
+The text inference path for LLaDA and Dream supports Ascend 910B through
+PyTorch-NPU.  The Ascend environment is intentionally kept separate from the
+original CUDA environment:
+
+```bash
+bash scripts/install_ascend.sh
+conda activate dllm-cache-ascend
+python scripts/preflight_ascend.py --run-hccl
+bash scripts/download_models_ascend.sh
+```
+
+See [docs/ascend.md](docs/ascend.md) for pinned versions, single-NPU demos,
+cache benchmarks, and 8-NPU evaluation.  Training and the multimodal LLaDA-V
+and MMaDA paths are not part of the initial Ascend port.
+
 3. Demo:
 
 ```bash
@@ -45,20 +62,26 @@ python demo_{model_name}.py
 ```
 
 4. Running Experiments:
+
+The existing `scripts/run_*.sh` files retain the upstream CUDA-oriented
+`accelerate_config.yaml` and batch sizes.  Do not run them unchanged on
+Ascend.  For Ascend evaluation, use `configs/accelerate_npu_8.yaml`, batch
+size 1, and the commands in [docs/ascend.md](docs/ascend.md).
+
 Run experiments using the provided scripts:
 
 ```bash
-bash eval_scripts/run_{model_name}_{task_name}_base.sh
+bash scripts/run_{model_name}_{task_name}_base.sh
 ```
 ### :blue_book: Example Usage
 1. GSM8K with LLaDA
 ```bash
-bash eval_scripts/run_LLaDA_gsm8k_base.sh
+bash scripts/run_LLaDA_gsm8k_base.sh
 ```
 
 2. BBH with Dream
 ```bash
-bash eval_scripts/run_Dream_bbh_base.sh
+bash scripts/run_Dream_bbh_base.sh
 ```
 
 
@@ -84,4 +107,3 @@ If you find dLLM-Cache useful for your research and applications, please cite us
 ## :star2: Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=maomaocun/dLLM-cache&type=Timeline)](https://www.star-history.com/#maomaocun/dLLM-cache&Timeline)
-

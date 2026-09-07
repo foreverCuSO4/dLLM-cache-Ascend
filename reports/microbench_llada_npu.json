@@ -1,0 +1,434 @@
+{
+  "benchmark": "dllm_cache_npu_operator_microbench",
+  "model": "llada",
+  "device": "npu:1",
+  "backend": "npu",
+  "npu_name": "Ascend910B4",
+  "torch_version": "2.4.0",
+  "python_version": "3.10.20",
+  "warmup": 100,
+  "repeats": 200,
+  "transfer_ratio": 0.25,
+  "shape_config": {
+    "batch_size": 1,
+    "prompt_length": 128,
+    "gen_length": 128,
+    "sequence_length": 256,
+    "transfer_tokens": 32,
+    "hidden_size": 4096,
+    "q_heads": 32,
+    "kv_heads": 32,
+    "head_dim": 128,
+    "kv_hidden_size": 4096,
+    "gqa_group_size": 1,
+    "dtype": "bfloat16",
+    "operations": {
+      "cosine_similarity": [
+        1,
+        128,
+        4096
+      ],
+      "topk": {
+        "scores": [
+          1,
+          128
+        ],
+        "k": 32
+      },
+      "gather": [
+        1,
+        32,
+        4096
+      ],
+      "scatter_kv": [
+        1,
+        128,
+        4096
+      ],
+      "scatter_hidden": [
+        1,
+        128,
+        4096
+      ],
+      "cat_kv": {
+        "prompt": [
+          1,
+          128,
+          4096
+        ],
+        "generation": [
+          1,
+          128,
+          4096
+        ]
+      },
+      "cat_hidden": {
+        "prompt": [
+          1,
+          128,
+          4096
+        ],
+        "generation": [
+          1,
+          128,
+          4096
+        ]
+      },
+      "contiguous": [
+        1,
+        32,
+        128,
+        256
+      ],
+      "sdpa_full": {
+        "q": [
+          1,
+          32,
+          256,
+          128
+        ],
+        "k_v": [
+          1,
+          32,
+          256,
+          128
+        ]
+      },
+      "sdpa_partial": {
+        "q": [
+          1,
+          32,
+          32,
+          128
+        ],
+        "k_v": [
+          1,
+          32,
+          256,
+          128
+        ]
+      },
+      "linear_q_small": {
+        "input": [
+          1,
+          32,
+          4096
+        ],
+        "weight": [
+          4096,
+          4096
+        ]
+      },
+      "linear_k_small": {
+        "input": [
+          1,
+          32,
+          4096
+        ],
+        "weight": [
+          4096,
+          4096
+        ]
+      },
+      "linear_v_full": {
+        "input": [
+          1,
+          128,
+          4096
+        ],
+        "weight": [
+          4096,
+          4096
+        ]
+      }
+    }
+  },
+  "results": [
+    {
+      "name": "cosine_similarity",
+      "samples": 200,
+      "latency_us": {
+        "mean": 248.98367933928967,
+        "p50": 247.65171110630035,
+        "p90": 258.9058130979538,
+        "p99": 280.1321819424629,
+        "min": 227.7027815580368,
+        "max": 315.08319079875946
+      },
+      "output_sha256": "fbea49a936bb925d3f570b2cde6c148a98979d9c4c6f2ada9b2670153f1247a1",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 127941120,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 4197376,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "topk",
+      "samples": 200,
+      "latency_us": {
+        "mean": 69.44742053747177,
+        "p50": 66.76558405160904,
+        "p90": 78.86793464422226,
+        "p99": 95.44588625431055,
+        "min": 61.081722378730774,
+        "max": 159.8801463842392
+      },
+      "output_sha256": "a02c06434a61718f09e7ab5db578e1e923e48b2314692a2c3ff18e8ebe7f3dda",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 123747328,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 3584,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "gather",
+      "samples": 200,
+      "latency_us": {
+        "mean": 414.53118436038494,
+        "p50": 414.9246960878372,
+        "p90": 423.683226108551,
+        "p99": 439.55227360129356,
+        "min": 395.6928849220276,
+        "max": 503.4152418375015
+      },
+      "output_sha256": "a189ce1e9d27f960eab5c3a194d984f103be6ad77691808b498c1fb19fe849d9",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 126367744,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 2624000,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "scatter_kv",
+      "samples": 200,
+      "latency_us": {
+        "mean": 213.88466469943523,
+        "p50": 212.42722868919373,
+        "p90": 220.59939801692963,
+        "p99": 229.81246933341018,
+        "min": 207.6718956232071,
+        "max": 241.79182946681976
+      },
+      "output_sha256": "1b06ea71c929318df26440d91c919ce4c94c993edda0e7c0879131fa738b7ed3",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 159136256,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 35392512,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "scatter_hidden",
+      "samples": 200,
+      "latency_us": {
+        "mean": 214.173486456275,
+        "p50": 212.937593460083,
+        "p90": 217.06726402044296,
+        "p99": 234.89437997341153,
+        "min": 207.8711986541748,
+        "max": 249.23309683799744
+      },
+      "output_sha256": "ebd0be2078ccb7ab45bbd38bc5ddbf6cf4db3103ee89532fcaa27fa9d112f0d1",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 159136256,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 35392512,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "cat_kv",
+      "samples": 200,
+      "latency_us": {
+        "mean": 57.908911257982254,
+        "p50": 57.149678468704224,
+        "p90": 61.24526262283325,
+        "p99": 70.81808522343633,
+        "min": 52.27141082286835,
+        "max": 92.21956133842468
+      },
+      "output_sha256": "c5dad82f7598e2c54e81f3cde4bffdf8812081c70231788bbd1bd063f318a81e",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 125846016,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 2102272,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "cat_hidden",
+      "samples": 200,
+      "latency_us": {
+        "mean": 57.71619267761707,
+        "p50": 56.75479769706726,
+        "p90": 61.083585023880005,
+        "p99": 72.90128618478772,
+        "min": 52.3589551448822,
+        "max": 92.310830950737
+      },
+      "output_sha256": "fef77f00a77d50bf25885ce9784512f59c16000b3014c310671d2cb10a5ce6d9",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 125846016,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 2102272,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "contiguous",
+      "samples": 200,
+      "latency_us": {
+        "mean": 69.28830407559872,
+        "p50": 68.99051368236542,
+        "p90": 71.35756313800812,
+        "p99": 75.33447816967961,
+        "min": 65.11062383651733,
+        "max": 96.92087769508362
+      },
+      "output_sha256": "92da155388caca3d0775a6690a9da6dc7ea3d2a7eb55b8cd191586d8adb787c5",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 125846016,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 2102272,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "sdpa_full",
+      "samples": 200,
+      "latency_us": {
+        "mean": 128.01259756088257,
+        "p50": 127.0100474357605,
+        "p90": 130.87429106235504,
+        "p99": 143.07567849755276,
+        "min": 121.6307282447815,
+        "max": 229.22269999980927
+      },
+      "output_sha256": "ddff05ab4cfd8ddacc21384789f03a7e8c4d9464af82ee52ea352258a55b5523",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 176699904,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 52956160,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "sdpa_partial",
+      "samples": 200,
+      "latency_us": {
+        "mean": 116.47024191915989,
+        "p50": 115.63580483198166,
+        "p90": 119.73697692155838,
+        "p99": 133.38938355445853,
+        "min": 110.22202670574188,
+        "max": 175.95291137695312
+      },
+      "output_sha256": "d59cc6a48ffc5909bf719b5e7cd9fd43e654f9401fdf1f4fa216d9ef2fee9f83",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 145046016,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 21302272,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "linear_q_small",
+      "samples": 200,
+      "latency_us": {
+        "mean": 76.16766728460789,
+        "p50": 72.56586104631424,
+        "p90": 90.40217846632004,
+        "p99": 138.39162886142688,
+        "min": 69.91066038608551,
+        "max": 230.0310879945755
+      },
+      "output_sha256": "c71f77f018f1157cee0220063141ac3862926fcfd1a4e9c6537feaaeb6c49baf",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 124011008,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 267264,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "linear_k_small",
+      "samples": 200,
+      "latency_us": {
+        "mean": 73.49537685513496,
+        "p50": 73.03152233362198,
+        "p90": 74.9591737985611,
+        "p99": 81.19842037558554,
+        "min": 70.13045251369476,
+        "max": 98.20051491260529
+      },
+      "output_sha256": "ba029802137d0cd28cba2d23d14e66a5ec7a5e2a14518a1f31496c1d6d8c5ff5",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 124011008,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 267264,
+        "peak_extra_reserved_bytes": 0
+      }
+    },
+    {
+      "name": "linear_v_full",
+      "samples": 200,
+      "latency_us": {
+        "mean": 83.52577686309814,
+        "p50": 83.00598710775375,
+        "p90": 85.61331778764725,
+        "p99": 91.67635813355444,
+        "min": 80.02109825611115,
+        "max": 110.16055941581726
+      },
+      "output_sha256": "112473e175afea993956046859906d38809e94ac5e5cd40475b4f0e7f83b92da",
+      "memory": {
+        "current_allocated_bytes": 123743744,
+        "current_reserved_bytes": 218103808,
+        "peak_allocated_bytes": 125844480,
+        "peak_reserved_bytes": 218103808,
+        "total_device_bytes": 31662800896,
+        "peak_extra_allocated_bytes": 2100736,
+        "peak_extra_reserved_bytes": 0
+      }
+    }
+  ]
+}
