@@ -196,3 +196,8 @@ token_similarity_adjacent
 token
 results
 grid_images
+# Ascend NPU profiler traces (large, regenerable)
+reports/profile_*_npu/
+# lm-eval harness output dirs and run logs
+reports/lm_eval_*/
+reports/*.log
