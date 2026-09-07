@@ -1,6 +1,8 @@
 import torch
 from collections import defaultdict
 
+from .Config import dLLMCacheConfig
+
 
 class Singleton(type):
     _instances = {}
@@ -28,11 +30,17 @@ class dLLMCache(metaclass=Singleton):
         cfg_interval_steps: int = 1,
         transfer_ratio: float = 0.0,
     ) -> "dLLMCache":
+        config = dLLMCacheConfig(
+            prompt_interval_steps=prompt_interval_steps,
+            gen_interval_steps=gen_interval_steps,
+            cfg_interval_steps=cfg_interval_steps,
+            transfer_ratio=transfer_ratio,
+        )
         ins = cls()
-        setattr(ins, "prompt_interval_steps", prompt_interval_steps)
-        setattr(ins, "gen_interval_steps", gen_interval_steps)
-        setattr(ins, "cfg_interval_steps", cfg_interval_steps)
-        setattr(ins, "transfer_ratio", transfer_ratio)
+        setattr(ins, "prompt_interval_steps", config.prompt_interval_steps)
+        setattr(ins, "gen_interval_steps", config.gen_interval_steps)
+        setattr(ins, "cfg_interval_steps", config.cfg_interval_steps)
+        setattr(ins, "transfer_ratio", config.transfer_ratio)
         ins.init()
         return ins
 
@@ -44,7 +52,6 @@ class dLLMCache(metaclass=Singleton):
 
     def reset_cache(self, prompt_length: int = 0) -> None:
         self.init()
-        torch.cuda.empty_cache()
         self.prompt_length = prompt_length
         self.cache_type = "no_cfg"
 

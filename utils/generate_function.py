@@ -35,9 +35,33 @@ def generate(
     cfg_scale=0.0,
     remasking="low_confidence",
     mask_id=126336,
+    step_callback=None,
 ):
+    """Generate masked tokens, optionally reporting diffusion-step boundaries.
+
+    ``step_callback`` is intentionally optional so existing callers retain their
+    behaviour.  When provided it is called as ``callback(step, phase)`` twice
+    per diffusion step: once with ``phase='begin'`` immediately before the
+    model forward, and once with ``phase='end'`` after the token update.  This
+    is useful for profilers that need to delimit individual diffusion steps
+    without changing the generation algorithm.
+    """
     with torch.no_grad():
         batch_size, prompt_length = input_ids.shape
+        if attention_mask is not None:
+            if attention_mask.shape != input_ids.shape:
+                raise ValueError(
+                    "attention_mask must have the same shape as input_ids, got "
+                    f"{tuple(attention_mask.shape)} and {tuple(input_ids.shape)}"
+                )
+            # The model sees the prompt and the masked generation region together.
+            # Generated positions are valid attention positions, so extend a
+            # prompt-only padding mask to the full sequence length.
+            model_attention_mask = F.pad(
+                attention_mask, (0, gen_length), value=1
+            )
+        else:
+            model_attention_mask = None
         x = torch.full(
             (batch_size, prompt_length + gen_length),
             mask_id,
@@ -67,6 +91,9 @@ def generate(
             )
 
             for i in range(steps_per_block):
+                global_step = num_block * steps_per_block + i
+                if step_callback is not None:
+                    step_callback(global_step, "begin")
                 mask_index = x == mask_id
                 if cfg_scale > 0.0:
                     if hasattr(feature_cache, "cfg_interval_steps"):
@@ -74,12 +101,12 @@ def generate(
                         if feature_cache.refresh_cfg(layer_id=33):
                             cfg_x = x.clone()
                             cfg_x[prompt_index] = mask_id
-                            logits = model(x, attention_mask=attention_mask).logits[
+                            logits = model(x, attention_mask=model_attention_mask).logits[
                                 :, prompt_length:
                             ]
                             feature_cache.cache_type = "cfg"
                             cfg_logits = model(
-                                cfg_x, attention_mask=attention_mask
+                                cfg_x, attention_mask=model_attention_mask
                             ).logits[:, prompt_length:]
                             cfg_residual = logits - cfg_logits
                             feature_cache.set_cache(
@@ -97,22 +124,22 @@ def generate(
                                 cache_type="gen",
                             )
                             feature_cache.cache_type = "no_cfg"
-                            logits = model(x, attention_mask=attention_mask).logits[
+                            logits = model(x, attention_mask=model_attention_mask).logits[
                                 :, prompt_length:
                             ]
                     else:
                         cfg_x = x.clone()
                         cfg_x[prompt_index] = mask_id
-                        logits = model(x, attention_mask=attention_mask).logits[
+                        logits = model(x, attention_mask=model_attention_mask).logits[
                             :, prompt_length:
                         ]
-                        cfg_logits = model(cfg_x, attention_mask=attention_mask).logits[
+                        cfg_logits = model(cfg_x, attention_mask=model_attention_mask).logits[
                             :, prompt_length:
                         ]
                         cfg_residual = logits - cfg_logits
                     logits = (logits - cfg_residual) + (cfg_scale + 1) * cfg_residual
                 else:
-                    logits = model(x, attention_mask=attention_mask).logits[
+                    logits = model(x, attention_mask=model_attention_mask).logits[
                         :, prompt_length:
                     ]
                 logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
@@ -145,4 +172,6 @@ def generate(
                     ).indices
                     transfer_index[j, select_index] = True
                 x[:, prompt_length:][transfer_index] = x0[transfer_index]
+                if step_callback is not None:
+                    step_callback(global_step, "end")
         return x[:, prompt_length:]

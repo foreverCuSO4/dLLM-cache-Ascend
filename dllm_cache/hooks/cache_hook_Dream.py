@@ -3,36 +3,254 @@ from typing import Optional, Tuple
 from transformers.cache_utils import Cache
 from dllm_cache.cache import dLLMCache
 import torch.nn as nn
+import inspect
 import types
+
+
+_HOOK_MARKER = "_dllm_cache_dream_hooked"
+
+
+def _find_target_module(
+    model: nn.Module, tf_block_module_key_name: str
+) -> Optional[nn.Module]:
+    for name, module in model.named_modules():
+        if name == tf_block_module_key_name:
+            return module
+    return None
+
+
+def _has_parameters(function, required_names, description: str) -> None:
+    if not callable(function):
+        raise TypeError(f"{description} must be callable")
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Cannot inspect {description} signature") from exc
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    missing = [
+        name for name in required_names if name not in parameters and not accepts_kwargs
+    ]
+    if missing:
+        raise TypeError(
+            f"{description} is missing required parameters: {', '.join(missing)}"
+        )
+
+
+def _is_hooked_method(method, hook) -> bool:
+    return getattr(method, "__func__", None) is hook
+
+
+def _validate_block(tf_block: nn.Module, block_index: int) -> None:
+    required_block_attributes = (
+        "self_attn",
+        "input_layernorm",
+        "post_attention_layernorm",
+        "mlp",
+    )
+    missing = [
+        name for name in required_block_attributes if not hasattr(tf_block, name)
+    ]
+    if missing:
+        raise TypeError(
+            f"Decoder block {block_index} is missing required attributes: "
+            f"{', '.join(missing)}"
+        )
+    required_attention_attributes = (
+        "layer_idx",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "num_heads",
+        "num_key_value_heads",
+        "num_key_value_groups",
+        "head_dim",
+        "hidden_size",
+        "attention_dropout",
+        "o_proj",
+    )
+    missing = [
+        name
+        for name in required_attention_attributes
+        if not hasattr(tf_block.self_attn, name)
+    ]
+    if missing:
+        raise TypeError(
+            f"Decoder block {block_index} self_attn is missing required attributes: "
+            f"{', '.join(missing)}"
+        )
+
+    if getattr(tf_block, _HOOK_MARKER, False):
+        correctly_hooked = _is_hooked_method(
+            tf_block.forward, decoder_hook
+        ) and _is_hooked_method(tf_block.self_attn.forward, attention)
+        if not correctly_hooked:
+            raise RuntimeError(
+                f"Decoder block {block_index} has an inconsistent Dream hook state"
+            )
+        return
+
+    conflicts = [
+        name
+        for owner, name in (
+            (tf_block, "_old_forward"),
+            (tf_block.self_attn, "_old_forward"),
+        )
+        if hasattr(owner, name)
+    ]
+    if conflicts:
+        raise RuntimeError(
+            f"Decoder block {block_index} already contains hook backup attributes: "
+            f"{', '.join(conflicts)}"
+        )
+
+    _has_parameters(
+        tf_block.forward,
+        ("hidden_states", "attention_mask", "position_ids"),
+        f"decoder block {block_index} forward",
+    )
+    _has_parameters(
+        tf_block.self_attn.forward,
+        ("hidden_states", "attention_mask"),
+        f"decoder block {block_index} attention forward",
+    )
+
+
+def _restore_block(tf_block: nn.Module) -> None:
+    if hasattr(tf_block, "_old_forward"):
+        tf_block.forward = tf_block._old_forward
+        delattr(tf_block, "_old_forward")
+    self_attn = getattr(tf_block, "self_attn", None)
+    if self_attn is not None and hasattr(self_attn, "_old_forward"):
+        self_attn.forward = self_attn._old_forward
+        delattr(self_attn, "_old_forward")
+    if hasattr(tf_block, _HOOK_MARKER):
+        delattr(tf_block, _HOOK_MARKER)
 
 
 def logout_cache_Dream(model: nn.Module, tf_block_module_key_name: str) -> None:
     """Restore original functions for transformer blocks and attention modules."""
-    target_module: Optional[nn.ModuleList] = None
-    for name, module in model.named_modules():
-        if name == tf_block_module_key_name:
-            target_module = module
-            break
+    target_module = _find_target_module(model, tf_block_module_key_name)
     if target_module is None:
         return
-    for tf_block in target_module:
-        if hasattr(tf_block, "_old_forward"):
-            tf_block.forward = tf_block._old_forward
-            delattr(tf_block, "_old_forward")
-        if hasattr(tf_block.self_attn, "_old_forward"):
-            tf_block.self_attn.forward = tf_block.self_attn._old_forward
-            delattr(tf_block.self_attn, "_old_forward")
+    try:
+        blocks = list(target_module)
+    except TypeError as exc:
+        raise TypeError(
+            f"Target module '{tf_block_module_key_name}' is not an iterable block container"
+        ) from exc
+    for tf_block in blocks:
+        _restore_block(tf_block)
 
 def register_cache_Dream(model: nn.Module, tf_block_module_key_name: str) -> None:
-    target_module: Optional[nn.ModuleList] = None
-    for name, module in model.named_modules():
-        if name == tf_block_module_key_name:
-            target_module = module
-    for tf_block in target_module:
-        setattr(tf_block, "_old_forward", tf_block.forward)
-        tf_block.forward = types.MethodType(decoder_hook, tf_block)
-        setattr(tf_block.self_attn, "_old_forward", tf_block.self_attn.forward)
-        tf_block.self_attn.forward = types.MethodType(attention, tf_block.self_attn)
+    target_module = _find_target_module(model, tf_block_module_key_name)
+    if target_module is None:
+        raise ValueError(
+            f"Could not find transformer block module '{tf_block_module_key_name}'"
+        )
+    try:
+        blocks = list(target_module)
+    except TypeError as exc:
+        raise TypeError(
+            f"Target module '{tf_block_module_key_name}' is not an iterable block container"
+        ) from exc
+    if not blocks:
+        raise ValueError(
+            f"Transformer block module '{tf_block_module_key_name}' is empty"
+        )
+
+    for block_index, tf_block in enumerate(blocks):
+        _validate_block(tf_block, block_index)
+
+    newly_hooked = []
+    try:
+        for tf_block in blocks:
+            if getattr(tf_block, _HOOK_MARKER, False):
+                continue
+            newly_hooked.append(tf_block)
+            setattr(tf_block, "_old_forward", tf_block.forward)
+            setattr(tf_block.self_attn, "_old_forward", tf_block.self_attn.forward)
+            tf_block.forward = types.MethodType(decoder_hook, tf_block)
+            tf_block.self_attn.forward = types.MethodType(
+                attention, tf_block.self_attn
+            )
+            setattr(tf_block, _HOOK_MARKER, True)
+    except Exception:
+        for tf_block in reversed(newly_hooked):
+            _restore_block(tf_block)
+        raise
+
+
+def _normalize_q_index(
+    q_index: Optional[torch.Tensor], batch_size: int, device: torch.device
+) -> Optional[torch.Tensor]:
+    if q_index is None:
+        return None
+    if q_index.ndim == 1:
+        q_index = q_index.unsqueeze(0)
+    if q_index.ndim != 2:
+        raise ValueError(f"q_index must be 1D or 2D, got shape {tuple(q_index.shape)}")
+    if q_index.shape[0] == 1 and batch_size != 1:
+        q_index = q_index.expand(batch_size, -1)
+    elif q_index.shape[0] != batch_size:
+        raise ValueError(
+            f"q_index batch size {q_index.shape[0]} does not match query batch "
+            f"size {batch_size}"
+        )
+    return q_index.to(device=device, dtype=torch.long)
+
+
+def _select_attention_mask(
+    attention_mask: torch.Tensor,
+    q_index: Optional[torch.Tensor],
+    query_len: int,
+    key_len: int,
+) -> torch.Tensor:
+    if attention_mask.ndim == 2:
+        if attention_mask.shape[-1] < key_len:
+            raise ValueError(
+                f"attention_mask key length {attention_mask.shape[-1]} is smaller "
+                f"than the required key length {key_len}"
+            )
+        return attention_mask[:, None, None, :key_len]
+    if attention_mask.ndim == 3:
+        attention_mask = attention_mask.unsqueeze(1)
+    if attention_mask.ndim != 4:
+        raise ValueError(
+            "attention_mask must have 2, 3, or 4 dimensions, "
+            f"got shape {tuple(attention_mask.shape)}"
+        )
+    if attention_mask.shape[-1] < key_len:
+        raise ValueError(
+            f"attention_mask key length {attention_mask.shape[-1]} is smaller than "
+            f"the required key length {key_len}"
+        )
+
+    attention_mask = attention_mask[..., :key_len]
+    if attention_mask.shape[-2] == 1:
+        return attention_mask
+    if q_index is None:
+        if attention_mask.shape[-2] < query_len:
+            raise ValueError(
+                f"attention_mask query length {attention_mask.shape[-2]} is smaller "
+                f"than the required query length {query_len}"
+            )
+        return attention_mask[..., -query_len:, :]
+
+    if attention_mask.shape[0] == 1 and q_index.shape[0] != 1:
+        attention_mask = attention_mask.expand(q_index.shape[0], -1, -1, -1)
+    elif attention_mask.shape[0] != q_index.shape[0]:
+        raise ValueError(
+            f"attention_mask batch size {attention_mask.shape[0]} does not match "
+            f"q_index batch size {q_index.shape[0]}"
+        )
+    mask_q_index = q_index.to(device=attention_mask.device)
+    gather_index = mask_q_index[:, None, :, None].expand(
+        -1, attention_mask.shape[1], -1, key_len
+    )
+    return torch.gather(attention_mask, dim=2, index=gather_index)
 
 
 def refresh_index(
@@ -43,6 +261,17 @@ def refresh_index(
 ) -> torch.Tensor:
     batch_size, gen_len, d_model = new_features.shape
     num_replace = int(gen_len * transfer_ratio)
+    if num_replace == 0:
+        return torch.empty(
+            (batch_size, 0), dtype=torch.long, device=new_features.device
+        )
+    if cached_features is None:
+        raise ValueError("cached_features is required when selecting refresh indices")
+    if new_features.shape != cached_features.shape:
+        raise ValueError(
+            "new_features and cached_features must have the same shape, got "
+            f"{tuple(new_features.shape)} and {tuple(cached_features.shape)}"
+        )
     cos_sim = torch.nn.functional.cosine_similarity(
         new_features, cached_features, dim=-1
     )
@@ -73,7 +302,10 @@ def decoder_hook(
     x_gen = x[:, prompt_length:]
     transfer_ratio = feature_cache.transfer_ratio
     bs, seq_len, dim = x.shape
-    transfer = transfer_ratio > 0 and transfer_ratio <= 1
+    transfer = (
+        0 < transfer_ratio <= 1
+        and int(x_gen.shape[1] * transfer_ratio) > 0
+    )
 
     def project(x):
         x_normed = self.input_layernorm(x)
@@ -132,10 +364,12 @@ def decoder_hook(
         k = torch.cat([kv_cache_prompt["k"], k_gen], dim=1)
         v = torch.cat([kv_cache_prompt["v"], v_gen], dim=1)
         gen_index = (
-            (torch.arange(seq_len - prompt_length) + prompt_length)
+            (
+                torch.arange(seq_len - prompt_length, device=q_gen.device)
+                + prompt_length
+            )
             .unsqueeze(0)
             .expand(bs, -1)
-            .to(q_gen.device)
         )
         attn_gen = self.self_attn(
             q_gen, k, v, attention_mask, position_embeddings, gen_index
@@ -176,9 +410,10 @@ def decoder_hook(
             q_gen_index = self.self_attn.q_proj(x_gen_selected)
             k_gen_index = self.self_attn.k_proj(x_gen_selected)
             kv_cache_gen["v"] = v_gen
+            k_index_expanded = index.unsqueeze(-1).expand_as(k_gen_index)
             kv_cache_gen["k"].scatter_(
                 dim=1,
-                index=index.unsqueeze(-1).expand(-1, -1, dim // 7),
+                index=k_index_expanded,
                 src=k_gen_index,
             )
             feature_cache.set_cache(
@@ -192,10 +427,9 @@ def decoder_hook(
         if transfer:
             q_prompt_gen_index = torch.cat([q_prompt, q_gen_index], dim=1)
             prompt_index = (
-                torch.arange(prompt_length)
+                torch.arange(prompt_length, device=q_prompt_gen_index.device)
                 .unsqueeze(0)
                 .expand(bs, -1)
-                .to(q_prompt_gen_index.device)
             )
             gen_index = index + prompt_length
             att_prompt_gen_index = self.self_attn(
@@ -222,7 +456,9 @@ def decoder_hook(
                 v,
                 attention_mask,
                 position_embeddings,
-                torch.arange(prompt_length).unsqueeze(0).expand(bs, -1),
+                torch.arange(prompt_length, device=q_prompt.device)
+                .unsqueeze(0)
+                .expand(bs, -1),
             )
         feature_cache.set_cache(
             layer_id=self.self_attn.layer_idx,
@@ -256,9 +492,10 @@ def decoder_hook(
             q_gen_index = self.self_attn.q_proj(x_gen_selected)
             k_gen_index = self.self_attn.k_proj(x_gen_selected)
             kv_cache_gen["v"] = v_gen
+            k_index_expanded = index.unsqueeze(-1).expand_as(k_gen_index)
             kv_cache_gen["k"].scatter_(
                 dim=1,
-                index=index.unsqueeze(-1).expand(-1, -1, dim // 7),
+                index=k_index_expanded,
                 src=k_gen_index,
             )
             feature_cache.set_cache(
@@ -372,6 +609,11 @@ def attention(
         bsz, k_len, self.num_key_value_heads, self.head_dim
     ).transpose(1, 2)
 
+    q_index = _normalize_q_index(q_index, bsz, query_states.device)
+    if q_index is not None and q_index.shape[1] != q_len:
+        raise ValueError(
+            f"q_index length {q_index.shape[1]} does not match query length {q_len}"
+        )
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(
         query_states, key_states, cos, sin, q_index
@@ -379,15 +621,23 @@ def attention(
 
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
-    if query_states.device.type == "cuda" and attention_mask is not None:
+    # Dream's generation code uses the string sentinel ``"full"`` for an
+    # unmasked sequence.  The original Dream SDPA attention only forwards a
+    # mask when it is a tensor, so preserve that remote-code contract here.
+    if isinstance(attention_mask, torch.Tensor):
+        attention_mask = _select_attention_mask(
+            attention_mask, q_index, q_len, k_len
+        )
         query_states = query_states.contiguous()
         key_states = key_states.contiguous()
         value_states = value_states.contiguous()
+    else:
+        attention_mask = None
     attn_output = torch.nn.functional.scaled_dot_product_attention(
         query_states,
         key_states,
         value_states,
-        attn_mask=None,
+        attn_mask=attention_mask,
         dropout_p=self.attention_dropout if self.training else 0.0,
         is_causal=False,
     )
@@ -409,6 +659,12 @@ def apply_rotary_pos_emb(q, k, cos, sin, q_index=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     if q_index is not None:
+        q_index = _normalize_q_index(q_index, q.shape[0], q.device)
+        if q_index.shape[1] != q.shape[-2]:
+            raise ValueError(
+                f"q_index length {q_index.shape[1]} does not match query length "
+                f"{q.shape[-2]}"
+            )
         bs, _ = q_index.shape
         q_embed = []
         if cos.shape[0] != q_index.shape[0] or sin.shape[0] != q_index.shape[0]:
